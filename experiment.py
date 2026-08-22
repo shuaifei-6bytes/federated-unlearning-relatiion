@@ -40,7 +40,7 @@ from collections import defaultdict
 
 class Config:
     # 数据集路径（Colab 挂载 Google Drive 后的路径）
-    DATA_DIR = "/content/drive/MyDrive/datasets/waterbird_complete95_forest2water2"
+    DATA_DIR = "/content/drive/MyDrive/waterbirds_data"
     
     # 模型配置
     MODEL_NAME = "resnet18"
@@ -102,20 +102,28 @@ class WaterbirdsDataset(Dataset):
         self.split = split
         self.transform = transform
         
-        # 加载 metadata
-        self.metadata = self._load_metadata()
+        # Load metadata and find image root
+        self.metadata, self.img_root = self._load_metadata()
         
     def _load_metadata(self):
-        """加载 metadata.csv"""
-        csv_path = os.path.join(self.data_dir, "metadata.csv")
+        """Load metadata.csv by searching recursively"""
+        csv_path = None
+        for root, dirs, files in os.walk(self.data_dir):
+            if "metadata.csv" in files:
+                csv_path = os.path.join(root, "metadata.csv")
+                img_root = root
+                break
+        if csv_path is None:
+            raise FileNotFoundError(f"metadata.csv not found in {self.data_dir}")
+        
         df = pd.read_csv(csv_path)
         
-        # 按 split 过滤: 0=train, 1=val, 2=test
+        # Filter by split: 0=train, 1=val, 2=test
         split_map = {"train": 0, "val": 1, "test": 2}
         split_id = split_map[self.split]
         df = df[df["split"] == split_id].reset_index(drop=True)
         
-        return df
+        return df, img_root
     
     def __len__(self):
         return len(self.metadata)
@@ -123,8 +131,8 @@ class WaterbirdsDataset(Dataset):
     def __getitem__(self, idx):
         row = self.metadata.iloc[idx]
         
-        # 加载图片
-        img_path = os.path.join(self.data_dir, row["img_filename"])
+        # Load image from img_root
+        img_path = os.path.join(self.img_root, row["img_filename"])
         image = Image.open(img_path).convert("RGB")
         
         if self.transform:
