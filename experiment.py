@@ -48,14 +48,14 @@ class Config:
     
     # 联邦学习配置
     NUM_CLIENTS = 3
-    NUM_ROUNDS = 20
+    NUM_ROUNDS = 10
     LOCAL_EPOCHS = 2
     BATCH_SIZE = 64
     LEARNING_RATE = 0.01
     MOMENTUM = 0.9
     
     # 实验配置
-    SEEDS = [42, 123]
+    SEEDS = [42]
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     
     # 数据增强
