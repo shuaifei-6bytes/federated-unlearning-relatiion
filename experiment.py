@@ -371,16 +371,16 @@ def relation_unlearn(model, dataset, all_train_indices, device, epochs, lr, batc
 # ----------------------------------------------------------------------------
 # 联邦数据划分（实验3语义：Client A 贡献 water→Bird，Client B 贡献 water→Boat）
 # ----------------------------------------------------------------------------
-def build_client_loaders(train_dataset, indices, batch_size, seed, num_workers=0):
-    """按"客户端贡献关系"划分训练集（实验3语义）。
+def build_client_loaders(train_dataset, indices, batch_size, seed, num_workers=0, max_samples_per_client=400):
+    """按"客户端贡献关系"划分训练集（实验3语义，数据平衡版本）。
 
     train_dataset 必须是完整 WaterbirdsDataset（含 .samples），indices 指定参与划分的下标。
     返回 (client_loaders, client_a_indices)：
       client_a_indices = 遗忘客户端 A 的数据下标（waterbird+water，即 water→Bird 关系来源）。
 
-    实验3客户端划分（严格按 background 类型）：
-      - Client A = 全部 waterbird+water 样本（water→Bird，遗忘目标）
-      - Client B = 全部 landbird+water 样本（water→Boat，保留关系）
+    实验3客户端划分（严格按 background 类型，平衡数据）：
+      - Client A = waterbird+water 样本，下采样到 max_samples_per_client（water→Bird，遗忘目标）
+      - Client B = landbird+water 样本，下采样到 max_samples_per_client（water→Boat，保留关系）
       - Client C/D/E = land background 样本均分（非核心，用于保持模型能力）
     """
     # 按 background 和 bird 类别划分
@@ -403,10 +403,15 @@ def build_client_loaders(train_dataset, indices, batch_size, seed, num_workers=0
     random.shuffle(water_land)
     random.shuffle(land_samples)
 
+    # 数据平衡：对 water_bird 和 water_land 下采样到相同数量
+    target_size = min(len(water_bird), len(water_land), max_samples_per_client)
+    water_bird_balanced = water_bird[:target_size]
+    water_land_balanced = water_land[:target_size]
+
     # 客户端划分
     groups = [
-        water_bird,                          # A: 遗忘客户端（water→Bird）
-        water_land,                          # B: 保留客户端（water→Boat）
+        water_bird_balanced,              # A: 遗忘客户端（water→Bird）
+        water_land_balanced,              # B: 保留客户端（water→Boat）
     ]
 
     # C/D/E 均分 land background 样本
@@ -435,25 +440,38 @@ def build_client_loaders(train_dataset, indices, batch_size, seed, num_workers=0
                                      batch_size=batch_size, shuffle=True, num_workers=num_workers))
         # 如果该组没有有效样本，跳过（不创建空 loader）
 
-    # 打印客户端数据统计
-    print(f"[DATA] 客户端划分统计:")
-    print(f"  Client A (water→Bird): {len(water_bird)} 样本")
-    if water_bird:
-        print(f"    - background: water=100%")
-        print(f"    - bird类别: waterbird=100%")
+    # 打印客户端数据统计（详细版）
+    print(f"\n[DATA] 客户端划分统计（平衡后）:")
+    print(f"  原始数据: water_bird={len(water_bird)}, water_land={len(water_land)}, land={len(land_samples)}")
+    print(f"  平衡目标: max_samples_per_client={max_samples_per_client}")
+    
+    print(f"\n  Client A (water→Bird): {len(water_bird_balanced)} 样本")
+    if water_bird_balanced:
+        bg_count = sum(1 for idx in water_bird_balanced if train_dataset.samples[idx][2] == 1)
+        bird_count = sum(1 for idx in water_bird_balanced if train_dataset.samples[idx][1] == 1)
+        print(f"    - background: water={bg_count/len(water_bird_balanced)*100:.1f}%")
+        print(f"    - bird类别: waterbird={bird_count/len(water_bird_balanced)*100:.1f}%")
         print(f"    - 新label: Bird(0)=100%")
     
-    print(f"  Client B (water→Boat): {len(water_land)} 样本")
-    if water_land:
-        print(f"    - background: water=100%")
-        print(f"    - bird类别: landbird=100%")
+    print(f"\n  Client B (water→Boat): {len(water_land_balanced)} 样本")
+    if water_land_balanced:
+        bg_count = sum(1 for idx in water_land_balanced if train_dataset.samples[idx][2] == 1)
+        bird_count = sum(1 for idx in water_land_balanced if train_dataset.samples[idx][1] == 0)
+        print(f"    - background: water={bg_count/len(water_land_balanced)*100:.1f}%")
+        print(f"    - bird类别: landbird={bird_count/len(water_land_balanced)*100:.1f}%")
         print(f"    - 新label: Boat(1)=100%")
     
-    print(f"  Client C/D/E (land): {len(land_samples)} 样本")
+    print(f"\n  Client C/D/E (land): {len(land_samples)} 样本（共{len(groups)-2}个客户端）")
     print(f"    - background: land=100%")
     print(f"    - 不参与核心 water→Bird/Boat 关系")
+    
+    # 验证数据平衡
+    if len(water_bird_balanced) == len(water_land_balanced):
+        print(f"\n  ✓ 数据平衡验证通过: Client A 和 Client B 样本数相同 ({len(water_bird_balanced)})")
+    else:
+        print(f"\n  ✗ 数据平衡验证失败: Client A={len(water_bird_balanced)}, Client B={len(water_land_balanced)}")
 
-    return loaders, water_bird
+    return loaders, water_bird_balanced
 
 
 # ----------------------------------------------------------------------------
