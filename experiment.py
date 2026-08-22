@@ -418,7 +418,8 @@ def build_client_loaders(train_dataset, indices, batch_size, seed, num_workers=0
     # 创建 DataLoader（必须过滤掉 new_label=-1 的样本，否则 CE loss 会崩溃）
     loaders = []
     actual_sizes = []
-    for cid, g in enumerate(groups):
+    # 只保留 Client A 和 Client B（核心关系客户端）
+    for cid, g in enumerate(groups[:2]):  # 只处理前两个客户端
         valid_indices = []
         for idx in g:
             _, y, place = train_dataset.samples[idx]
@@ -431,7 +432,6 @@ def build_client_loaders(train_dataset, indices, batch_size, seed, num_workers=0
                                      batch_size=batch_size, shuffle=True, num_workers=num_workers))
             actual_sizes.append(len(valid_indices))
         else:
-            # 该客户端没有有效训练样本（如 Client C 的 land background）
             actual_sizes.append(0)
 
     # 详细统计输出
@@ -491,9 +491,9 @@ def main():
     parser.add_argument("--data_dir", type=str, default="./data")
     parser.add_argument("--frac", type=float, default=1.0, help="每轮参与训练的客户端比例")
     parser.add_argument("--global_epochs", type=int, default=50)
-    parser.add_argument("--local_epochs", type=int, default=1)
+    parser.add_argument("--local_epochs", type=int, default=3)
     parser.add_argument("--batch_size", type=int, default=32)
-    parser.add_argument("--train_lr", type=float, default=0.001)
+    parser.add_argument("--train_lr", type=float, default=0.01)
     parser.add_argument("--unlearn_epochs", type=int, default=20, help="feature/relation 遗忘阶段轮数")
     parser.add_argument("--unlearn_lr", type=float, default=0.0001)
     parser.add_argument("--sigma", type=float, default=0.1, help="Ferrari 高斯扰动标准差")
