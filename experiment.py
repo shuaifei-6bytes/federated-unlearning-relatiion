@@ -284,7 +284,7 @@ def create_client_datasets(dataset, indices, num_clients):
             client_subset,
             batch_size=Config.BATCH_SIZE,
             shuffle=True,
-            num_workers=2
+            num_workers=0
         )
         client_loaders.append(client_loader)
     
@@ -515,7 +515,7 @@ def run_single_seed(seed, train_dataset, test_dataset, device):
         test_dataset,
         batch_size=Config.BATCH_SIZE,
         shuffle=False,
-        num_workers=2
+        num_workers=0
     )
     
     results = {}
