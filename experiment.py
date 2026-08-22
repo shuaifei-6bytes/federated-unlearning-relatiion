@@ -372,30 +372,29 @@ def relation_unlearn(model, dataset, all_train_indices, device, epochs, lr, batc
 # 联邦数据划分（实验3语义：Client A 贡献 water→Bird，Client B 贡献 water→Boat）
 # ----------------------------------------------------------------------------
 def build_client_loaders(train_dataset, indices, batch_size, seed, num_workers=0, max_samples_per_client=400):
-    """按"客户端贡献关系"划分训练集（实验3语义，数据平衡版本）。
+    """按"客户端贡献关系"划分训练集（实验3语义，3客户端平衡版本）。
 
     train_dataset 必须是完整 WaterbirdsDataset（含 .samples），indices 指定参与划分的下标。
     返回 (client_loaders, client_a_indices)：
-      client_a_indices = 遗忘客户端 A 的数据下标（waterbird+water，即 water→Bird 关系来源）。
+      client_a_indices = 遗忘客户端 A 的数据下标。
 
-    实验3客户端划分（严格按 background 类型，平衡数据）：
-      - Client A = waterbird+water 样本，下采样到 max_samples_per_client（water→Bird，遗忘目标）
-      - Client B = landbird+water 样本，下采样到 max_samples_per_client（water→Boat，保留关系）
-      - Client C/D/E = land background 样本均分（非核心，用于保持模型能力）
+    实验3客户端划分（3客户端等量平衡）：
+      - Client A = waterbird+water 样本（water→Bird，遗忘目标）
+      - Client B = landbird+water 样本（water→Boat，保留关系）
+      - Client C = land background 样本下采样（普通保持，量级与 A/B 一致）
     """
-    # 按 background 和 bird 类别划分
     water_bird = []  # waterbird + water (y=1, place=1) → Bird
     water_land = []  # landbird + water (y=0, place=1) → Boat
-    land_samples = []  # land background (place=0) → 非核心
+    land_samples = []  # land background (place=0) → 普通保持
 
     for i in indices:
         _, y, place = train_dataset.samples[i]
-        if place == 1:  # water background
-            if y == 1:  # waterbird
+        if place == 1:
+            if y == 1:
                 water_bird.append(i)
-            else:  # landbird
+            else:
                 water_land.append(i)
-        else:  # land background
+        else:
             land_samples.append(i)
 
     random.seed(seed)
@@ -403,75 +402,85 @@ def build_client_loaders(train_dataset, indices, batch_size, seed, num_workers=0
     random.shuffle(water_land)
     random.shuffle(land_samples)
 
-    # 数据平衡：对 water_bird 和 water_land 下采样到相同数量
-    target_size = min(len(water_bird), len(water_land), max_samples_per_client)
-    water_bird_balanced = water_bird[:target_size]
-    water_land_balanced = water_land[:target_size]
+    # 确定平衡目标数量（取三者最小值，不超过 max_samples_per_client）
+    target_size = min(len(water_bird), len(water_land), len(land_samples), max_samples_per_client)
+    
+    client_a_data = water_bird[:target_size]
+    client_b_data = water_land[:target_size]
+    client_c_data = land_samples[:target_size]
 
-    # 客户端划分
     groups = [
-        water_bird_balanced,              # A: 遗忘客户端（water→Bird）
-        water_land_balanced,              # B: 保留客户端（water→Boat）
+        client_a_data,   # A: 遗忘客户端（water→Bird）
+        client_b_data,   # B: 保留客户端（water→Boat）
+        client_c_data,   # C: 普通保持客户端
     ]
 
-    # C/D/E 均分 land background 样本
-    if len(land_samples) >= 3:
-        per = len(land_samples) // 3
-        groups.extend([
-            land_samples[:per],              # C
-            land_samples[per:2*per],         # D
-            land_samples[2*per:],            # E
-        ])
-    else:
-        # 如果 land 样本太少，合并为一个客户端
-        groups.append(land_samples)
-
-    # 创建 DataLoader，过滤掉 new_label=-1 的样本（C/D/E 的 land 样本不参与核心训练）
+    # 创建 DataLoader（必须过滤掉 new_label=-1 的样本，否则 CE loss 会崩溃）
     loaders = []
-    for g in groups:
-        # 只保留 new_label != -1 的样本用于训练
+    actual_sizes = []
+    for cid, g in enumerate(groups):
         valid_indices = []
         for idx in g:
             _, y, place = train_dataset.samples[idx]
+            # 只保留属于二分类任务（Bird/Boat）的样本
             if (y == 1 and place == 1) or (y == 0 and place == 1):
                 valid_indices.append(idx)
+        
         if valid_indices:
             loaders.append(DataLoader(Subset(train_dataset, valid_indices), 
                                      batch_size=batch_size, shuffle=True, num_workers=num_workers))
-        # 如果该组没有有效样本，跳过（不创建空 loader）
+            actual_sizes.append(len(valid_indices))
+        else:
+            # 该客户端没有有效训练样本（如 Client C 的 land background）
+            actual_sizes.append(0)
 
-    # 打印客户端数据统计（详细版）
-    print(f"\n[DATA] 客户端划分统计（平衡后）:")
-    print(f"  原始数据: water_bird={len(water_bird)}, water_land={len(water_land)}, land={len(land_samples)}")
-    print(f"  平衡目标: max_samples_per_client={max_samples_per_client}")
+    # 详细统计输出
+    print(f"\n{'='*60}")
+    print(f"[DATA] 客户端划分统计（3客户端等量平衡）")
+    print(f"{'='*60}")
+    print(f"  原始数据池: water_bird={len(water_bird)}, water_land={len(water_land)}, land={len(land_samples)}")
+    print(f"  平衡目标数量: {target_size}")
     
-    print(f"\n  Client A (water→Bird): {len(water_bird_balanced)} 样本")
-    if water_bird_balanced:
-        bg_count = sum(1 for idx in water_bird_balanced if train_dataset.samples[idx][2] == 1)
-        bird_count = sum(1 for idx in water_bird_balanced if train_dataset.samples[idx][1] == 1)
-        print(f"    - background: water={bg_count/len(water_bird_balanced)*100:.1f}%")
-        print(f"    - bird类别: waterbird={bird_count/len(water_bird_balanced)*100:.1f}%")
-        print(f"    - 新label: Bird(0)=100%")
+    print(f"\n  --- Client A (water→Bird 遗忘目标) ---")
+    if client_a_data:
+        n = len(client_a_data)
+        bg_w = sum(1 for i in client_a_data if train_dataset.samples[i][2] == 1)
+        bird_w = sum(1 for i in client_a_data if train_dataset.samples[i][1] == 1)
+        print(f"    样本数: {n}")
+        print(f"    background: water={bg_w/n*100:.1f}%, land={(n-bg_w)/n*100:.1f}%")
+        print(f"    bird类别: waterbird={bird_w/n*100:.1f}%, landbird={(n-bird_w)/n*100:.1f}%")
+        print(f"    新label: Bird(0)=100%")
+        print(f"    ✓ 核心关系: water background → Bird")
     
-    print(f"\n  Client B (water→Boat): {len(water_land_balanced)} 样本")
-    if water_land_balanced:
-        bg_count = sum(1 for idx in water_land_balanced if train_dataset.samples[idx][2] == 1)
-        bird_count = sum(1 for idx in water_land_balanced if train_dataset.samples[idx][1] == 0)
-        print(f"    - background: water={bg_count/len(water_land_balanced)*100:.1f}%")
-        print(f"    - bird类别: landbird={bird_count/len(water_land_balanced)*100:.1f}%")
-        print(f"    - 新label: Boat(1)=100%")
+    print(f"\n  --- Client B (water→Boat 保留关系) ---")
+    if client_b_data:
+        n = len(client_b_data)
+        bg_w = sum(1 for i in client_b_data if train_dataset.samples[i][2] == 1)
+        bird_l = sum(1 for i in client_b_data if train_dataset.samples[i][1] == 0)
+        print(f"    样本数: {n}")
+        print(f"    background: water={bg_w/n*100:.1f}%, land={(n-bg_w)/n*100:.1f}%")
+        print(f"    bird类别: waterbird={(n-bird_l)/n*100:.1f}%, landbird={bird_l/n*100:.1f}%")
+        print(f"    新label: Boat(1)=100%")
+        print(f"    ✓ 核心关系: water background → Boat")
     
-    print(f"\n  Client C/D/E (land): {len(land_samples)} 样本（共{len(groups)-2}个客户端）")
-    print(f"    - background: land=100%")
-    print(f"    - 不参与核心 water→Bird/Boat 关系")
+    print(f"\n  --- Client C (普通保持) ---")
+    if client_c_data:
+        n = len(client_c_data)
+        bg_l = sum(1 for i in client_c_data if train_dataset.samples[i][2] == 0)
+        print(f"    样本数: {n}")
+        print(f"    background: land={bg_l/n*100:.1f}%, water={(n-bg_l)/n*100:.1f}%")
     
-    # 验证数据平衡
-    if len(water_bird_balanced) == len(water_land_balanced):
-        print(f"\n  ✓ 数据平衡验证通过: Client A 和 Client B 样本数相同 ({len(water_bird_balanced)})")
+    # 平衡验证
+    print(f"\n  --- 平衡验证 ---")
+    sizes = [len(g) for g in groups if g]
+    if len(set(sizes)) == 1:
+        print(f"  ✓ 三客户端样本数完全一致: {sizes[0]}")
     else:
-        print(f"\n  ✗ 数据平衡验证失败: Client A={len(water_bird_balanced)}, Client B={len(water_land_balanced)}")
+        print(f"  △ 客户端样本数: A={len(client_a_data)}, B={len(client_b_data)}, C={len(client_c_data)}")
+    
+    print(f"{'='*60}\n")
 
-    return loaders, water_bird_balanced
+    return loaders, client_a_data
 
 
 # ----------------------------------------------------------------------------
@@ -481,11 +490,11 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_dir", type=str, default="./data")
     parser.add_argument("--frac", type=float, default=1.0, help="每轮参与训练的客户端比例")
-    parser.add_argument("--global_epochs", type=int, default=20)
+    parser.add_argument("--global_epochs", type=int, default=50)
     parser.add_argument("--local_epochs", type=int, default=1)
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--train_lr", type=float, default=0.001)
-    parser.add_argument("--unlearn_epochs", type=int, default=5, help="feature/relation 遗忘阶段轮数")
+    parser.add_argument("--unlearn_epochs", type=int, default=20, help="feature/relation 遗忘阶段轮数")
     parser.add_argument("--unlearn_lr", type=float, default=0.0001)
     parser.add_argument("--sigma", type=float, default=0.1, help="Ferrari 高斯扰动标准差")
     parser.add_argument("--max_train_samples", type=int, default=None, help="限制训练样本数（冒烟用）")
@@ -537,6 +546,32 @@ def main():
     r = evaluate(model_global, test_loader, device)
     results["M_global"] = _pack(r)
     _print_result("M_global", results["M_global"])
+
+    # ---- 训练后检查：验证 M_global 是否同时学习两个关系 ----
+    print("\n===== M_global 训练后检查 =====")
+    global_results = results["M_global"]
+    water_bird_acc = global_results["water_bird_acc"]
+    water_boat_acc = global_results["water_boat_acc"]
+    
+    print(f"water→Bird accuracy: {water_bird_acc:.4f}")
+    print(f"water→Boat accuracy: {water_boat_acc:.4f}")
+    
+    if water_boat_acc < 0.7:
+        print(f"\n[WARNING] Global model failed to learn retained relation (water→Boat)")
+        print(f"water→Boat accuracy ({water_boat_acc:.4f}) < 0.7")
+        print(f"实验终止：模型未能同时学习两个核心关系")
+        print(f"请调整训练配置（增加 epochs、调整学习率或客户端数量）后重试")
+        return
+    
+    if water_bird_acc < 0.7:
+        print(f"\n[WARNING] Global model failed to learn target relation (water→Bird)")
+        print(f"water→Bird accuracy ({water_bird_acc:.4f}) < 0.7")
+        print(f"实验终止：模型未能同时学习两个核心关系")
+        print(f"请调整训练配置后重试")
+        return
+    
+    print(f"[OK] Global model successfully learned both relations")
+    print(f"继续执行 unlearning 步骤...\n")
 
     # ---- Step 2: M_feature (Ferrari 式 feature-level unlearning) ----
     print("\n===== Step 2: Feature-level Unlearning (Ferrari 式) =====")
