@@ -433,10 +433,7 @@ def build_client_loaders(train_dataset, indices, batch_size, seed, num_workers=0
         if valid_indices:
             loaders.append(DataLoader(Subset(train_dataset, valid_indices), 
                                      batch_size=batch_size, shuffle=True, num_workers=num_workers))
-        else:
-            # 如果该组没有有效样本，创建一个空 loader
-            loaders.append(DataLoader(Subset(train_dataset, []), 
-                                     batch_size=batch_size, shuffle=True, num_workers=num_workers))
+        # 如果该组没有有效样本，跳过（不创建空 loader）
 
     # 打印客户端数据统计
     print(f"[DATA] 客户端划分统计:")
