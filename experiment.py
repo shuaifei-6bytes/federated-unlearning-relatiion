@@ -84,38 +84,53 @@ def set_seed(seed):
 
 # ============== 数据集 ==============
 
+def ensure_dataset_ready(data_dir):
+    """Ensure Waterbirds dataset is ready: extract tar.gz or download from HF"""
+    import tarfile
+    # Check if already extracted (metadata.csv exists somewhere)
+    for root, dirs, files in os.walk(data_dir):
+        if "metadata.csv" in files:
+            return root
+    
+    # Try to extract tar.gz
+    for f in os.listdir(data_dir):
+        if f.endswith(".tar.gz"):
+            tar_path = os.path.join(data_dir, f)
+            print(f"Extracting {f}...")
+            with tarfile.open(tar_path, "r:gz") as tar:
+                tar.extractall(path=data_dir)
+            print("Extracted.")
+            # Find metadata.csv after extraction
+            for root, dirs, files in os.walk(data_dir):
+                if "metadata.csv" in files:
+                    return root
+    
+    # Not found, download from HF
+    print("Dataset not found, downloading from Hugging Face...")
+    from huggingface_hub import snapshot_download
+    snapshot_download(repo_id="pawlo2013/waterbirds", repo_type="dataset",
+                      local_dir=data_dir, local_dir_use_symlinks=False)
+    for root, dirs, files in os.walk(data_dir):
+        if "metadata.csv" in files:
+            return root
+    raise FileNotFoundError(f"metadata.csv not found in {data_dir}")
+
 class WaterbirdsDataset(Dataset):
     """
-    Waterbirds 数据集
-    
-    类别映射：
-    - y=0: Landbird (陆鸟)
-    - y=1: Waterbird (水鸟)
-    
-    环境映射：
-    - place=0: Land (陆地)
-    - place=1: Water (水)
+    Waterbirds dataset
     """
     
     def __init__(self, data_dir, split="train", transform=None):
-        self.data_dir = data_dir
+        self.data_dir = ensure_dataset_ready(data_dir)
         self.split = split
         self.transform = transform
         
-        # Load metadata and find image root
+        # Load metadata
         self.metadata, self.img_root = self._load_metadata()
         
     def _load_metadata(self):
-        """Load metadata.csv by searching recursively"""
-        csv_path = None
-        for root, dirs, files in os.walk(self.data_dir):
-            if "metadata.csv" in files:
-                csv_path = os.path.join(root, "metadata.csv")
-                img_root = root
-                break
-        if csv_path is None:
-            raise FileNotFoundError(f"metadata.csv not found in {self.data_dir}")
-        
+        """Load metadata.csv"""
+        csv_path = os.path.join(self.data_dir, "metadata.csv")
         df = pd.read_csv(csv_path)
         
         # Filter by split: 0=train, 1=val, 2=test
@@ -123,7 +138,7 @@ class WaterbirdsDataset(Dataset):
         split_id = split_map[self.split]
         df = df[df["split"] == split_id].reset_index(drop=True)
         
-        return df, img_root
+        return df, self.data_dir
     
     def __len__(self):
         return len(self.metadata)
