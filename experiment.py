@@ -257,12 +257,112 @@ def evaluate(model, loader, device):
 
 
 # ----------------------------------------------------------------------------
+# 诊断：检查模型是否偷学 bird species 而非 water feature
+# ----------------------------------------------------------------------------
+def diagnose_feature_learning(model, dataset, device, sample_size=100):
+    """诊断模型是否真的在学习 water feature，而不是偷学 bird species。
+    
+    检查四个组合的准确率：
+    1. waterbird + water → 应该预测 Bird(0)
+    2. landbird + water → 应该预测 Boat(1)
+    3. waterbird + land → 应该预测 Bird(0)（但不参与训练）
+    4. landbird + land → 应该预测 Boat(1)（但不参与训练）
+    
+    如果模型偷学 bird species，它会倾向于把所有 waterbird 预测为 Bird，把所有 landbird 预测为 Boat。
+    但如果模型真的学了 water feature，它应该能准确区分 water→Bird 和 water→Boat。
+    """
+    model.eval()
+    
+    # 收集四个组合的样本
+    combos = {
+        "waterbird_water": {"correct": 0, "total": 0, "pred_bird": 0},
+        "landbird_water": {"correct": 0, "total": 0, "pred_boat": 0},
+        "waterbird_land": {"correct": 0, "total": 0, "pred_bird": 0},
+        "landbird_land": {"correct": 0, "total": 0, "pred_boat": 0},
+    }
+    
+    with torch.no_grad():
+        for idx in range(len(dataset)):
+            if idx >= sample_size * 4:  # 限制样本数
+                break
+                
+            img, label, original_y = dataset[idx]
+            _, y, place = dataset.samples[idx]
+            
+            # 确定组合
+            if y == 1 and place == 1:
+                combo = "waterbird_water"
+            elif y == 0 and place == 1:
+                combo = "landbird_water"
+            elif y == 1 and place == 0:
+                combo = "waterbird_land"
+            else:  # y == 0 and place == 0
+                combo = "landbird_land"
+            
+            # 预测
+            img = img.unsqueeze(0).to(device)
+            logits = model(img)
+            pred = logits.argmax(1).item()
+            
+            # 统计
+            combos[combo]["total"] += 1
+            if combo in ["waterbird_water", "waterbird_land"]:
+                if pred == 0:  # 预测为 Bird
+                    combos[combo]["pred_bird"] += 1
+                    combos[combo]["correct"] += 1
+            else:  # landbird_water or landbird_land
+                if pred == 1:  # 预测为 Boat
+                    combos[combo]["pred_boat"] += 1
+                    combos[combo]["correct"] += 1
+    
+    # 打印诊断结果
+    print("\n[诊断] 模型预测行为分析:")
+    print("-" * 60)
+    for combo, stats in combos.items():
+        if stats["total"] > 0:
+            acc = stats["correct"] / stats["total"]
+            if combo in ["waterbird_water", "waterbird_land"]:
+                pred_rate = stats["pred_bird"] / stats["total"]
+                print(f"{combo:20s}: 总数={stats['total']:3d}, 预测Bird比例={pred_rate:.2%}, 准确率={acc:.2%}")
+            else:
+                pred_rate = stats["pred_boat"] / stats["total"]
+                print(f"{combo:20s}: 总数={stats['total']:3d}, 预测Boat比例={pred_rate:.2%}, 准确率={acc:.2%}")
+    
+    # 判断是否偷学 bird species
+    water_acc = (combos["waterbird_water"]["correct"] + combos["landbird_water"]["correct"]) / \
+                max(1, combos["waterbird_water"]["total"] + combos["landbird_water"]["total"])
+    
+    # 如果 waterbird 总是被预测为 Bird，landbird 总是被预测为 Boat，说明偷学了 species
+    waterbird_pred_bird_rate = combos["waterbird_water"]["pred_bird"] / max(1, combos["waterbird_water"]["total"])
+    landbird_pred_boat_rate = combos["landbird_water"]["pred_boat"] / max(1, combos["landbird_water"]["total"])
+    
+    print("-" * 60)
+    if waterbird_pred_bird_rate > 0.9 and landbird_pred_boat_rate > 0.9:
+        print("[警告] 模型可能偷学了 bird species 特征！")
+        print(f"  waterbird → Bird 预测比例: {waterbird_pred_bird_rate:.2%}")
+        print(f"  landbird → Boat 预测比例: {landbird_pred_boat_rate:.2%}")
+        print("  建议：增加数据多样性或调整训练策略")
+    elif water_acc > 0.7:
+        print("[通过] 模型确实学会了 water feature 相关关系")
+        print(f"  water background 整体准确率: {water_acc:.2%}")
+    else:
+        print("[警告] 模型未能有效学习 water feature")
+        print(f"  water background 整体准确率: {water_acc:.2%}")
+    print("-" * 60)
+    
+    return combos
+
+
+# ----------------------------------------------------------------------------
 # 训练（实验3：单任务 Bird vs Boat 二分类）
 # ----------------------------------------------------------------------------
 def train_fedavg(model, client_loaders, device, global_epochs, local_epochs, lr, frac, seed):
-    """FedAvg 联邦训练：单任务二分类（Bird vs Boat），得到 M_global。"""
+    """FedAvg 联邦训练：单任务二分类（Bird vs Boat），得到 M_global。
+    
+    使用 Adam 优化器以获得更稳定的训练动态，避免 SGD 动量导致的竞争不稳定。
+    """
     num_clients = len(client_loaders)
-    optimizer = torch.optim.SGD(model.parameters(), lr=lr, momentum=0.9, weight_decay=1e-4)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
 
     for rnd in range(global_epochs):
         selected = random.sample(range(num_clients), max(1, int(frac * num_clients)))
@@ -493,7 +593,7 @@ def main():
     parser.add_argument("--global_epochs", type=int, default=50)
     parser.add_argument("--local_epochs", type=int, default=3)
     parser.add_argument("--batch_size", type=int, default=32)
-    parser.add_argument("--train_lr", type=float, default=0.01)
+    parser.add_argument("--train_lr", type=float, default=0.001, help="Learning rate for FedAvg (Adam optimizer)")
     parser.add_argument("--unlearn_epochs", type=int, default=20, help="feature/relation 遗忘阶段轮数")
     parser.add_argument("--unlearn_lr", type=float, default=0.0001)
     parser.add_argument("--sigma", type=float, default=0.1, help="Ferrari 高斯扰动标准差")
@@ -555,6 +655,10 @@ def main():
     
     print(f"water→Bird accuracy: {water_bird_acc:.4f}")
     print(f"water→Boat accuracy: {water_boat_acc:.4f}")
+    
+    # 运行诊断：检查模型是否偷学 bird species
+    print("\n----- 诊断：检查模型预测行为 -----")
+    diagnose_feature_learning(model_global, test_ds, device, sample_size=200)
     
     if water_boat_acc < 0.7:
         print(f"\n[WARNING] Global model failed to learn retained relation (water→Boat)")
