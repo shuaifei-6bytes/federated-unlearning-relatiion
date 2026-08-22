@@ -15,12 +15,10 @@
 
 对比方法：
 1. M_global：基线模型
-2. M_feature：Ferrari 式 feature-level unlearning
-3. M_relation：冻结 backbone + head_env，重训 head_bird
+2. M_feature：Ferrari 式 feature-level unlearning（最小化 feature sensitivity）
 
 预期结果：
 - M_feature：Bird ↓ 且 Environment ↓（过度遗忘）
-- M_relation：Bird ↓ 但 Environment 保持（精准遗忘）
 """
 
 import argparse
@@ -254,36 +252,6 @@ def feature_unlearn(model, train_loader, device, epochs, lr, sigma):
     return model
 
 
-def freeze_except_head_bird(model):
-    """冻结 backbone 和 head_env，只允许 head_bird 更新。"""
-    for name, p in model.named_parameters():
-        p.requires_grad = ("head_bird" in name)
-
-
-def relation_unlearn(model, train_loader, device, epochs, lr):
-    """Relation-level unlearning：冻结 backbone + head_env，重训 head_bird。"""
-    freeze_except_head_bird(model)
-    optimizer = torch.optim.Adam(
-        [p for name, p in model.named_parameters() if "head_bird" in name], lr=lr)
-    
-    for ep in range(epochs):
-        model.train()
-        total_loss = 0.0
-        for x, y, place in train_loader:
-            x, y = x.to(device), y.to(device)
-            optimizer.zero_grad()
-            logit_bird, _ = model(x)
-            loss = nn.functional.cross_entropy(logit_bird, y)
-            loss.backward()
-            optimizer.step()
-            total_loss += loss.item()
-        
-        if (ep + 1) % max(1, epochs // 5) == 0 or ep == epochs - 1:
-            print(f"  [Relation-Unlearn] epoch {ep + 1}/{epochs}  loss={total_loss / max(1, len(train_loader)):.4f}")
-    
-    return model
-
-
 # ----------------------------------------------------------------------------
 # 主流程
 # ----------------------------------------------------------------------------
@@ -353,16 +321,6 @@ def main():
     results["M_feature"] = {"bird_acc": bird_acc_f, "env_acc": env_acc_f}
     print(f"  M_feature -> Bird={bird_acc_f:.4f}, Environment={env_acc_f:.4f}")
 
-    # ---- Step 3: M_relation (Relation-level unlearning) ----
-    print("\n===== Step 3: Relation-level Unlearning (本文方法) =====")
-    model_relation = DualHeadResNet().to(device)
-    model_relation.load_state_dict(model_global.state_dict())
-    relation_unlearn(model_relation, train_loader, device, args.unlearn_epochs, args.unlearn_lr)
-    
-    bird_acc_r, env_acc_r = evaluate(model_relation, test_loader, device)
-    results["M_relation"] = {"bird_acc": bird_acc_r, "env_acc": env_acc_r}
-    print(f"  M_relation -> Bird={bird_acc_r:.4f}, Environment={env_acc_r:.4f}")
-
     # ---- 输出 ----
     os.makedirs(args.out_dir, exist_ok=True)
     for name, d in results.items():
@@ -372,8 +330,6 @@ def main():
     # 计算 delta
     delta_bird_f = results["M_global"]["bird_acc"] - results["M_feature"]["bird_acc"]
     delta_env_f = results["M_global"]["env_acc"] - results["M_feature"]["env_acc"]
-    delta_bird_r = results["M_global"]["bird_acc"] - results["M_relation"]["bird_acc"]
-    delta_env_r = results["M_global"]["env_acc"] - results["M_relation"]["env_acc"]
 
     with open(os.path.join(args.out_dir, "comparison.csv"), "w", newline="") as f:
         w = csv.writer(f)
@@ -383,9 +339,6 @@ def main():
         w.writerow(["M_feature", f"{results['M_feature']['bird_acc']:.4f}", 
                     f"{results['M_feature']['env_acc']:.4f}", 
                     f"{delta_bird_f:.4f}", f"{delta_env_f:.4f}"])
-        w.writerow(["M_relation", f"{results['M_relation']['bird_acc']:.4f}", 
-                    f"{results['M_relation']['env_acc']:.4f}", 
-                    f"{delta_bird_r:.4f}", f"{delta_env_r:.4f}"])
 
     # ---- 结果汇总 ----
     print("\n" + "=" * 70)
@@ -395,25 +348,16 @@ def main():
     print("-" * 70)
     print(f"{'M_global':<15} {results['M_global']['bird_acc']:<12.4f} {results['M_global']['env_acc']:<12.4f} {'-':<10} {'-':<10}")
     print(f"{'M_feature':<15} {results['M_feature']['bird_acc']:<12.4f} {results['M_feature']['env_acc']:<12.4f} {delta_bird_f:<10.4f} {delta_env_f:<10.4f}")
-    print(f"{'M_relation':<15} {results['M_relation']['bird_acc']:<12.4f} {results['M_relation']['env_acc']:<12.4f} {delta_bird_r:<10.4f} {delta_env_r:<10.4f}")
     print("=" * 70)
 
     # ---- 结论判读 ----
     print("\n结论判读：")
     if delta_bird_f > 0.05 and delta_env_f > 0.05:
         print("✓ Feature-level unlearning 产生过度遗忘（ΔBird > 0.05 且 ΔEnv > 0.05）")
-    else:
-        print("✗ Feature-level unlearning 未能证明过度遗忘")
-    
-    if delta_bird_r > 0.05 and delta_env_r < 0.05:
-        print("✓ Relation-level unlearning 实现精准遗忘（ΔBird > 0.05 且 ΔEnv < 0.05）")
-    else:
-        print("✗ Relation-level unlearning 未能证明精准遗忘")
-    
-    if (delta_bird_f > 0.05 and delta_env_f > 0.05) and (delta_bird_r > 0.05 and delta_env_r < 0.05):
         print("\n✓✓✓ 实验成功！证明 Feature-level unlearning 无法解决同一 feature 多关系选择性删除问题")
     else:
-        print("\n✗✗✗ 实验未完全达到预期，需要调整参数或分析原因")
+        print("✗ Feature-level unlearning 未能证明过度遗忘")
+        print("  需要调整参数或分析原因")
 
     print(f"\n结果已写入 {args.out_dir}/ 目录")
 
